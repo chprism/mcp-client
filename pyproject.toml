@@ -1,0 +1,10 @@
+[project]
+name = "mcp-client"
+version = "1.0.0"
+description = "MCP Client"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.52.2",
+    "mcp>=1.9.2",
+]
