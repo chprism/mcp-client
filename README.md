@@ -3,16 +3,25 @@
 ## 1. 项目概述
 
 这是一个基于 Model Context Protocol (MCP) 的客户端实现，用于连接和调用 MCP 服务器提供的工具。
-该客户端集成了 Anthropic 的 Claude AI 模型，能够处理用户查询，并在需要时调用 MCP 服务器提供的工具来增强 AI 的能力。
+该客户端支持多种 AI 模型：
+- Anthropic 的 Claude AI 模型（默认）
+- OpenAI 的 GPT 模型
+
+客户端能够处理用户查询，并在需要时调用 MCP 服务器提供的工具来增强 AI 的能力。
 
 ### 运行示例
 ```bash
-uv run mcp-client.py D:\02_pythonWorkspace\yahoo-finance\yahoo-finance.py
+# 使用默认的 Claude 模型
+python mcp-client.py <服务器脚本路径>
 
-python mcp-client.py   ../yahoo-finance/yahoo-finance.py
+# 使用 OpenAI 模型
+python mcp-client.py <服务器脚本路径> --model-provider openai
 
+# 设置环境变量示例
+python mcp-client.py <服务器脚本路径> -e KEY=VALUE
 
-python mcp-client.py  D:/02_pythonWorkspace/tinyurl-mcp-server/tinyurl_mcp_server/server.py -e TINYURL_API_KEY=RFgCTh6ya6LbgO7OmUV4oEtKuZqsELnQ9sdNZE6zRZoqxMyK7C4z9VpZhrar
+# 完整示例
+python mcp-client.py D:/02_pythonWorkspace/tinyurl-mcp-server/tinyurl_mcp_server/server.py -e TINYURL_API_KEY=your_api_key
 ```
 
 ## 2. 底层实现原理
@@ -29,7 +38,7 @@ MCP (Model Context Protocol) 是一种标准协议，用于连接 AI 模型与�
 
 该实现采用了客户端-服务器架构：
 
-- **MCP 服务器**：提供特定领域的工具和功能（如 Yahoo Finance 数据获取）
+- **MCP 服务器**：提供特定领域的工具和功能
 - **MCP 客户端**：连接到服务器，发现可用工具，并在 AI 模型的指导下调用这些工具
 
 ### 2.3 通信机制
@@ -48,7 +57,7 @@ MCP (Model Context Protocol) 是一种标准协议，用于连接 AI 模型与�
 
 1. 初始化与服务器的连接
 2. 处理用户查询
-3. 调用 Claude AI 模型
+3. 调用 AI 模型（Claude 或 OpenAI）
 4. 执行工具调用
 5. 管理交互式聊天循环
 
@@ -57,119 +66,59 @@ MCP (Model Context Protocol) 是一种标准协议，用于连接 AI 模型与�
 #### 3.2.1 `__init__` 方法
 
 ```python
-def __init__(self):
+def __init__(self, model_provider: Literal["anthropic", "openai"] = "anthropic"):
     # 初始化会话和客户端对象
     self.session: Optional[ClientSession] = None
     self.exit_stack = AsyncExitStack()
-    self.anthropic = Anthropic()
-    self.model = os.getenv("ANTHROPIC_MODEL")
+    
+    # 根据选择的模型提供商初始化客户端
+    self.model_provider = model_provider
+    if model_provider == "anthropic":
+        self.ai_client = Anthropic()
+        self.model = os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
+    else:
+        self.ai_client = OpenAI()
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
 ```
 
-- 初始化 MCP 会话对象（初始为 None）
-- 创建异步资源管理器 `AsyncExitStack`
-- 初始化 Anthropic 客户端
-- 从环境变量获取 Claude 模型名称
+#### 3.2.2 `process_query` 方法
 
-#### 3.2.2 `connect_to_server` 方法
+根据选择的模型提供商，分别调用不同的处理方法：
+- `_process_anthropic_query`: 处理 Claude 模型的查询
+- `_process_openai_query`: 处理 OpenAI 模型的查询
 
-```python
-async def connect_to_server(self, server_script_path: str):
-    # 判断服务器脚本类型（Python 或 JavaScript）
-    is_python = server_script_path.endswith('.py')
-    is_js = server_script_path.endswith('.js')
-    
-    # 设置启动命令和参数
-    command = "python" if is_python else "node"
-    server_params = StdioServerParameters(
-        command=command,
-        args=[server_script_path],
-        env=None
-    )
-    
-    # 建立 stdio 连接
-    stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-    self.stdio, self.write = stdio_transport
-    
-    # 初始化会话
-    self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-    await self.session.initialize()
-    
-    # 列出可用工具
-    response = await self.session.list_tools()
-    tools = response.tools
-    print("\nConnected to server with tools:", [tool.name for tool in tools])
-```
+## 4. 环境变量配置
 
-这个方法负责：
-- 根据文件扩展名确定服务器脚本的类型（Python 或 JavaScript）
-- 配置服务器启动参数
-- 建立基于标准输入/输出的通信通道
-- 初始化 MCP 会话
-- 获取并显示服务器提供的可用工具列表
+### 4.1 必需的环境变量
 
-#### 3.2.3 `process_query` 方法
+根据使用的模型，需要设置以下环境变量：
 
-这是客户端的核心方法，处理用户查询并在需要时调用工具：
+- **使用 Claude 模型时**：
+  - `ANTHROPIC_API_KEY`：Anthropic API 密钥
+  - `ANTHROPIC_MODEL`：Claude 模型版本（可选，默认为 "claude-3-sonnet-20240229"）
 
-1. 构建初始消息
-2. 获取可用工具列表
-3. 调用 Claude AI 模型处理查询
-4. 解析响应，处理工具调用
-5. 将工具调用结果反馈给 AI 模型
-6. 整合最终响应
+- **使用 OpenAI 模型时**：
+  - `OPENAI_API_KEY`：OpenAI API 密钥
+  - `OPENAI_MODEL`：GPT 模型版本（可选，默认为 "gpt-4-turbo-preview"）
 
-#### 3.2.4 `chat_loop` 方法
+### 4.2 其他环境变量
 
-提供交互式聊天界面，循环处理用户输入，直到用户输入 'quit'。
+- 可以通过命令行参数 `-e` 或 `--env` 设置其他环境变量
+- 支持从 `.env` 文件加载环境变量
 
-#### 3.2.5 `cleanup` 方法
+## 5. 命令行参数
 
-负责清理资源，关闭连接。
+```bash
+python mcp-client.py [-h] [--model-provider {anthropic,openai}] [--env ENV] server_script
 
-### 3.3 主函数流程
+位置参数:
+  server_script          服务器脚本路径
 
-1. 解析命令行参数（服务器脚本路径）
-2. 创建 MCPClient 实例
-3. 连接到指定的 MCP 服务器
-4. 启动交互式聊天循环
-5. 在结束时清理资源
-
-## 4. 关键参数说明
-
-### 4.1 环境变量
-
-- `ANTHROPIC_MODEL`：指定使用的 Claude 模型版本
-- `ANTHROPIC_API_KEY`：Anthropic API 密钥（通过 .env 文件加载）
-
-### 4.2 服务器参数 (StdioServerParameters)
-
-- `command`：启动服务器的命令（python 或 node）
-- `args`：命令行参数，包含服务器脚本路径
-- `env`：环境变量（此处为 None，使用当前环境）
-
-### 4.3 Claude API 参数
-
-- `model`：使用的 Claude 模型
-- `max_tokens`：生成的最大 token 数（设为 1000）
-- `messages`：对话历史
-- `tools`：可用工具列表
-
-## 5. 工作流程图
-
-```
-┌─────────────┐     ┌──────────────┐     ┌───────────────┐
-│  用户输入   │────>│  Claude AI   │────>│  解析响应     │
-└─────────────┘     └──────────────┘     └───────┬───────┘
-                           ↑                     │
-                           │                     ↓
-                    ┌──────┴───────┐     ┌───────────────┐
-                    │ 返回工具结果 │<────│  工具调用     │
-                    └──────────────┘     └───────┬───────┘
-                                                 │
-                                                 ↓
-                                         ┌───────────────┐
-                                         │  MCP 服务器   │
-                                         └───────────────┘
+可选参数:
+  -h, --help            显示帮助信息
+  --model-provider {anthropic,openai}, -m {anthropic,openai}
+                        选择模型提供商 (默认: anthropic)
+  --env ENV, -e ENV     设置环境变量，格式: KEY=VALUE
 ```
 
 ## 6. 技术依赖
@@ -177,19 +126,23 @@ async def connect_to_server(self, server_script_path: str):
 - **Python**: >= 3.12
 - **mcp**: >= 1.9.2（MCP 客户端库）
 - **anthropic**: >= 0.52.2（Claude AI API 客户端）
+- **openai**: >= 1.12.0（OpenAI API 客户端）
 - **asyncio**：用于异步操作
 - **dotenv**：用于加载环境变量
 
-## 7. 扩展与定制
+## 7. 输出格式
 
-该客户端可以连接到任何兼容 MCP 协议的服务器，只需提供相应的服务器脚本路径。可以通过以下方式扩展功能：
+客户端使用时间戳和角色标识来格式化输出：
 
-1. **自定义 MCP 服务器**：开发新的 MCP 服务器，提供特定领域的工具
-2. **增强查询处理**：修改 `process_query` 方法，实现更复杂的对话管理
-3. **添加用户界面**：替换简单的命令行界面，实现图形化界面
+```
+[HH:MM:SS User] 用户输入
+[HH:MM:SS AI] AI 响应
+[HH:MM:SS Tool] 工具调用和结果
+```
 
 ## 8. 注意事项
 
-- 确保已设置正确的环境变量（ANTHROPIC_API_KEY 和 ANTHROPIC_MODEL）
+- 确保已设置正确的 API 密钥环境变量
 - 服务器脚本必须是有效的 Python (.py) 或 JavaScript (.js) 文件
 - 服务器脚本必须实现 MCP 协议
+- 工具调用结果会被格式化显示，包括参数和返回值
